@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 
 from utils import gram_matrix
 
@@ -8,18 +9,19 @@ class InstanceNorm(tf.keras.layers.Layer):
     def __init__(self, epsilon=1e-3):
 
         super(InstanceNorm, self).__init__()
-        self.epsilon=epsilon
-        
-    def build(self, input_shape):
+        self.epsilon = epsilon
 
+    def build(self, input_shape):
         self.beta = tf.Variable(tf.zeros([input_shape[3]]))
-        self.gaama = tf.Variable(tf.zeros([input_shape[3]]))
+        self.gamma = tf.Variable(tf.ones([input_shape[3]]))
 
     def call(self, inputs):
 
         mean, variance = tf.nn.moments(inputs, axes=[1, 2], keepdims=True)
-        x = tf.divide(tf.subtract(inputs, mean), tf.add(variance, self.epsilon))
-        return x
+        x = tf.divide(tf.subtract(inputs, mean),
+                      tf.sqrt(tf.add(variance, self.epsilon)))
+
+        return self.gamma * x + self.beta
 
 
 def create_vgg_model(layer_names):
@@ -32,60 +34,71 @@ def create_vgg_model(layer_names):
     return model
 
 
-def conv2d_block(input_tensor, filters):
+def conv2d_block(input_tensor, filter, kernel_size, strides, res=False, activation=True):
 
     x = input_tensor
-    filter1, filter2, filter3 = filters
-
-    x = tf.keras.layers.Conv2D(filter1, kernel_size=(3, 3), strides=(1,1), padding="same", activation='relu')(x)
+    pad = kernel_size // 2
+    paddings = tf.constant([[0, 0], [pad, pad], [pad, pad], [0, 0]])
+    x = tf.pad(x, paddings, mode='REFLECT')
+    x = tf.keras.layers.Conv2D(filter, kernel_size=kernel_size,
+                               strides=strides, padding="valid", use_bias=False)(x)
     x = InstanceNorm()(x)
+    if activation:
+        x = tf.keras.layers.Activation('relu')(x)
+    residual_block = x
 
-    x = tf.keras.layers.Conv2D(filter2, kernel_size=(3, 3), strides=(1,1), padding="same", activation='relu')(x)
-    x = InstanceNorm()(x)
+    if res:
+        x = tf.keras.layers.Conv2D(
+            filter, kernel_size=kernel_size, strides=strides, padding="same", use_bias=False)(x)
+        # x = InstanceNorm()(x)
+        x = tf.keras.layers.add([residual_block, x])
 
-    x = tf.keras.layers.Conv2D(filter3, kernel_size=(3, 3), strides=(2, 2), padding="same", activation="relu")(x)
     return x
 
 
-def bottleneck_block(inputs, filter):
+def deconv_block(input_tensor, filter):
 
-    x = tf.keras.layers.Conv2D(filter, kernel_size=(3, 3), strides=(1, 1), padding="same", activation="relu", name="bottleneck")(inputs)
-    return x
-
-def deconv_block(input_tensor, filters):
-    
     x = input_tensor
 
-    filter1, filter2 = filters
-
-    x = tf.keras.layers.Conv2D(filter1, kernel_size=(3, 3), strides=(1, 1), padding='same')(x)
-    x = tf.keras.layers.UpSampling2D(size=(2, 2))(x)
-    
-    x = tf.keras.layers.Conv2D(filter2, kernel_size=(3, 3), strides=(1, 1), padding='same')(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.UpSampling2D(size=(2, 2), interpolation='nearest')(x)
+    x = tf.keras.layers.Conv2D(filter, kernel_size=(
+        3, 3), padding='same', strides=(1, 1))(x)
+    x = InstanceNorm()(x)
+    x = tf.keras.layers.Activation('relu')(x)
 
     return x
-    
 
-def custom_unet_model(input_shape):
-    
+
+def custom_actication(x):
+    return (tf.nn.tanh(x) * 150 + 255.0/2)
+
+
+def custom_unet_model(input_shape=(None, None, 3)):
+
     inputs = tf.keras.layers.Input(shape=input_shape)
-    x = conv2d_block(inputs, [64, 64, 128])
-    x = conv2d_block(x, [128, 128, 256])
-    x = conv2d_block(x, [128, 128, 256])
-    x = conv2d_block(x, [256, 256, 512])
+    x = conv2d_block(inputs, 32, 11, 1)
+    x = conv2d_block(x, 64, 3, 2)
+    x = conv2d_block(x, 128, 3, 2)
 
-    bottleneck = bottleneck_block(x, 512)
+    x = conv2d_block(x, 128, 3, 1, res=True)
+    x = conv2d_block(x, 128, 3, 1, res=True)
+    x = conv2d_block(x, 128, 3, 1, res=True)
+    x = conv2d_block(x, 128, 3, 1, res=True)
+    x = conv2d_block(x, 128, 3, 1, res=True)
 
-    x = deconv_block(bottleneck, [512, 256])
-    x = deconv_block(x, [256, 256])
-    x = deconv_block(x, [256, 128])
-    x = deconv_block(x, [128, 64])
+    x = deconv_block(x, 128)
+    x = deconv_block(x, 64)
 
-    x = tf.keras.layers.Conv2D(3, kernel_size=(2, 2), padding="same")(x)
-    
+    x = conv2d_block(x, 3, 11, 1, activation=False)
+    x = (tf.nn.tanh(x) * 150 + 255./2)
     model = tf.keras.models.Model(inputs, x)
     return model
+
+
+def preprocess_input(x):
+
+    mean = np.array([123.68, 116.779, 103.939])
+    return (x - mean)
 
 
 class ContentStyleModel(tf.keras.layers.Layer):
@@ -93,22 +106,21 @@ class ContentStyleModel(tf.keras.layers.Layer):
     def __init__(self, content_layers, style_layers):
         super(ContentStyleModel, self).__init__()
 
-        self.vgg = create_vgg_model(style_layers + style_layers)
+        self.vgg = create_vgg_model(style_layers + content_layers)
         self.content_layers = content_layers
         self.style_layers = style_layers
 
         self.content_layers_len = len(content_layers)
         self.style_layers_len = len(self.style_layers)
-        
-        for layer in self.vgg.layers:
-            layer.trainable = False
 
-    def call(self, inputs):        
-        preprocessed = tf.keras.applications.vgg19.preprocess_input(inputs)
+        self.vgg.trainable = False
+
+    def call(self, inputs):
+        preprocessed = preprocess_input(inputs)
         outputs = self.vgg(preprocessed)
 
-        style_outputs = [gram_matrix(features) for features in outputs[0:self.style_layers_len]]
+        style_outputs = [gram_matrix(features)
+                         for features in outputs[:self.style_layers_len]]
         content_outputs = outputs[self.style_layers_len:]
 
         return style_outputs, content_outputs
-        

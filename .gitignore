@@ -1,3 +1,9 @@
 dataset
+temp
+env
+.vscode
+scripts
+weights*
+checkpoint
 __pycache__
 .DS_Store
