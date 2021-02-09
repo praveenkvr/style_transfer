@@ -4,7 +4,7 @@ Implemented using tensorflow functional API.
 
 examples:
 
-<img src="images/original.jpg" width="200" height="200">
+<img src="images/original.jpg" height="200">
 
 Style             |  Trained
 :-------------------------:|:-------------------------:
